@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "diagforge"
+version = "0.1.0"
+description = "Deterministic multi-file compiler diagnostic minimizer"
+requires-python = ">=3.9"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+diagforge = "diagforge.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["diagforge*"]
+
+[tool.setuptools.package-data]
+diagforge = ["web/*", "demo/*", "demo/src/*"]

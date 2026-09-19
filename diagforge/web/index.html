@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>diagforge — 编译器诊断最小化</title>
+<style>
+  :root { --bg:#0f1420; --panel:#1a2233; --fg:#dbe4f0; --muted:#7f8ca3;
+          --ok:#4ade80; --bad:#f87171; --warn:#fbbf24; --acc:#60a5fa; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system, "SF Mono", Menlo, monospace;
+         background:var(--bg); color:var(--fg); }
+  header { padding:12px 20px; border-bottom:1px solid #2a3550;
+           display:flex; gap:12px; align-items:center; }
+  header h1 { font-size:16px; margin:0; color:var(--acc); }
+  main { display:flex; gap:16px; padding:16px 20px; align-items:flex-start; }
+  .panel { background:var(--panel); border:1px solid #2a3550; border-radius:8px;
+           padding:14px; }
+  #sessions { width:340px; flex:none; }
+  #detail { flex:1; min-width:0; }
+  button { background:#263352; color:var(--fg); border:1px solid #3a4a70;
+           border-radius:6px; padding:4px 10px; cursor:pointer; font:inherit; }
+  button:hover { background:#31416a; }
+  .sess { padding:8px; border:1px solid #2a3550; border-radius:6px;
+          margin-bottom:8px; cursor:pointer; }
+  .sess:hover { border-color:var(--acc); }
+  .sess .id { color:var(--acc); }
+  .muted { color:var(--muted); }
+  .stat { display:inline-block; margin-right:16px; }
+  .stat b { color:var(--acc); }
+  table { border-collapse:collapse; width:100%; margin-top:8px; }
+  th, td { text-align:left; padding:3px 8px; border-bottom:1px solid #2a3550;
+           font-size:12px; }
+  th { color:var(--muted); }
+  .st-accepted { color:var(--ok); } .st-rejected { color:var(--muted); }
+  .st-unstable { color:var(--warn); } .st-invalidated { color:var(--bad); }
+  .st-evaluating { color:var(--acc); }
+  textarea, input, select { width:100%; background:#101828; color:var(--fg);
+    border:1px solid #3a4a70; border-radius:6px; padding:6px; font:inherit;
+    font-size:12px; }
+  textarea { height:120px; }
+  .row { display:flex; gap:8px; margin:8px 0; }
+  .row > * { flex:1; }
+  h3 { margin:14px 0 6px; font-size:13px; color:var(--acc); }
+  pre { background:#101828; padding:8px; border-radius:6px; overflow:auto;
+        font-size:12px; max-height:260px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>diagforge</h1>
+  <span class="muted">确定性多文件编译器诊断最小化</span>
+  <button onclick="createDemo()">创建演示会话</button>
+  <button onclick="showNew()">新建会话</button>
+</header>
+<main>
+  <div class="panel" id="sessions">
+    <h3>会话</h3>
+    <div id="sessList"></div>
+    <div id="newForm" style="display:none">
+      <h3>新建会话 (JSON)</h3>
+      <textarea id="newJson"></textarea>
+      <div class="row"><button onclick="createSession()">创建</button></div>
+    </div>
+  </div>
+  <div class="panel" id="detail">
+    <div class="muted">选择左侧会话查看详情。</div>
+  </div>
+</main>
+<script>
+let current = null;
+
+async function api(path, method, body) {
+  const opt = {method: method || 'GET'};
+  if (body !== undefined) {
+    opt.headers = {'Content-Type': 'application/json'};
+    opt.body = JSON.stringify(body);
+  }
+  const r = await fetch(path, opt);
+  return {status: r.status, data: await r.json()};
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+
+async function refresh() {
+  const list = await api('/api/sessions');
+  const el = document.getElementById('sessList');
+  el.innerHTML = list.data.map(s => `
+    <div class="sess" onclick="select('${s.id}')">
+      <div class="id">${esc(s.id)}</div>
+      <div class="muted">状态 ${esc(s.status)} · epoch ${s.epoch} ·
+        运行 ${s.runs} · 队列 ${s.queued}</div>
+      <div class="muted">最优 ${s.best ? s.best.nfiles + ' 文件 / ' +
+        s.best.nbytes + ' B' : '—'}</div>
+    </div>`).join('') || '<div class="muted">暂无会话</div>';
+  if (current) renderDetail();
+}
+
+async function select(sid) { current = sid; renderDetail(); }
+
+async function renderDetail() {
+  const r = await api('/api/sessions/' + current);
+  if (r.status !== 200) return;
+  const s = r.data;
+  const div = document.getElementById('detail');
+  const divg = s.earliest_divergence;
+  div.innerHTML = `
+    <h3>${esc(s.id)}</h3>
+    <div>
+      <span class="stat">状态 <b>${esc(s.status)}</b></span>
+      <span class="stat">epoch <b>${s.epoch}</b></span>
+      <span class="stat">运行次数 <b>${s.runs}</b></span>
+      <span class="stat">候选 <b>${s.candidates}</b></span>
+      <span class="stat">队列中 <b>${s.queued}</b></span>
+      <span class="stat">最早分歧 <b>${divg ? esc(divg.candidate) +
+        ' (run ' + divg.run + ')' : '—'}</b></span>
+    </div>
+    <div>最优候选: <b>${s.best ? esc(s.best.id) + ' — ' + s.best.nfiles +
+      ' 文件 / ' + s.best.nbytes + ' 字节' : '—'}</b></div>
+    <div class="row">
+      <button onclick="ctrl('start')">开始</button>
+      <button onclick="ctrl('pause')">暂停</button>
+      <button onclick="ctrl('resume')">恢复</button>
+      <button onclick="ctrl('step', {steps: 10})">步进 ×10</button>
+      <button onclick="ctrl('resume', {allow_new_branch: true})">恢复(新分支)</button>
+      <button onclick="doExport()">导出</button>
+    </div>
+    <h3>钉住约束</h3>
+    <div class="row">
+      <select id="pinKind">
+        <option value="keep_text">保留文本</option>
+        <option value="keep_file">保留文件</option>
+        <option value="couple_files">文件共存</option>
+      </select>
+      <input id="pinFile" placeholder="文件名">
+      <input id="pinText" placeholder="文本 或 逗号分隔文件组">
+      <button onclick="addPin()">添加</button>
+    </div>
+    <div id="pinList"></div>
+    <h3>人工决定</h3>
+    <div class="row">
+      <input id="opName" placeholder="操作者">
+      <input id="opReason" placeholder="理由">
+      <input id="opCand" placeholder="候选 id">
+      <button onclick="decide('accept_candidate')">强制接受</button>
+      <button onclick="decide('reject_candidate')">强制拒绝</button>
+    </div>
+    <div id="decList"></div>
+    <h3>搜索树</h3>
+    <div id="tree"></div>`;
+  const pins = await api('/api/sessions/' + current + '/pins');
+  document.getElementById('pinList').innerHTML = pins.data.map(p =>
+    `<div>#${p.id} ${esc(p.kind)} ${esc(JSON.stringify(p.payload))}
+      ${p.active ? '' : '(已停用)'}</div>`).join('') ||
+    '<div class="muted">无</div>';
+  const decs = await api('/api/sessions/' + current + '/decisions');
+  document.getElementById('decList').innerHTML = decs.data.map(d =>
+    `<div>#${d.seq} [${esc(d.operator)}] ${esc(d.action)} —
+      ${esc(d.reason)} ${d.action === 'undo' ? '' :
+      `<button onclick="undo(${d.seq})">撤销</button>`}</div>`).join('') ||
+    '<div class="muted">无</div>';
+  const tree = await api('/api/sessions/' + current + '/tree');
+  document.getElementById('tree').innerHTML =
+    '<table><tr><th>seq</th><th>候选</th><th>父</th><th>变换</th>' +
+    '<th>大小</th><th>状态</th></tr>' + tree.data.map(c =>
+    `<tr><td>${c.seq}</td><td>${esc(c.id)}</td>
+     <td>${esc(c.parent || '—')}</td>
+     <td>${esc(c.transform ? JSON.stringify(c.transform) : '(root)')}</td>
+     <td>${c.nfiles}f/${c.nbytes}B</td>
+     <td class="st-${c.status}">${c.status}</td></tr>`).join('') + '</table>';
+}
+
+async function ctrl(action, extra) {
+  const body = Object.assign({action}, extra || {});
+  const r = await api('/api/sessions/' + current + '/control', 'POST', body);
+  if (r.status === 409) alert(r.data.message);
+  renderDetail();
+}
+
+async function addPin() {
+  const kind = document.getElementById('pinKind').value;
+  const file = document.getElementById('pinFile').value.trim();
+  const text = document.getElementById('pinText').value;
+  let payload;
+  if (kind === 'keep_text') payload = {file, text};
+  else if (kind === 'keep_file') payload = {file};
+  else payload = {files: text.split(',').map(s => s.trim()).filter(Boolean)};
+  await api('/api/sessions/' + current + '/pins', 'POST', {kind, payload});
+  renderDetail();
+}
+
+async function decide(action) {
+  await api('/api/sessions/' + current + '/decisions', 'POST', {
+    operator: document.getElementById('opName').value || 'anonymous',
+    reason: document.getElementById('opReason').value,
+    action, payload: {candidate: document.getElementById('opCand').value.trim()}});
+  renderDetail();
+}
+
+async function undo(seq) {
+  await api('/api/sessions/' + current + '/decisions/' + seq + '/undo', 'POST', {
+    operator: document.getElementById('opName').value || 'anonymous',
+    reason: document.getElementById('opReason').value || 'undo'});
+  renderDetail();
+}
+
+async function doExport() {
+  const r = await api('/api/sessions/' + current + '/export', 'POST', {});
+  alert('已导出到 ' + r.data.out_dir);
+}
+
+async function createDemo() {
+  const r = await api('/api/demo', 'POST', {});
+  current = r.data.id;
+  await api('/api/sessions/' + current + '/control', 'POST', {action: 'start'});
+  refresh();
+}
+
+function showNew() {
+  const f = document.getElementById('newForm');
+  f.style.display = f.style.display === 'none' ? 'block' : 'none';
+  document.getElementById('newJson').value = JSON.stringify({
+    files: {'a.c': 'int main(){return 0;} // TRIGGER\n'},
+    command: ['python3', '/path/to/fakecc.py', '{files}'],
+    predicate: {exit_codes: [1], stderr_contains: 'internal compiler error'},
+    k_runs: 2, timeout: 10}, null, 1);
+}
+
+async function createSession() {
+  const body = JSON.parse(document.getElementById('newJson').value);
+  const r = await api('/api/sessions', 'POST', body);
+  if (r.data.id) { current = r.data.id; refresh(); }
+  else alert(JSON.stringify(r.data));
+}
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

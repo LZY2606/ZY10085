@@ -34,3 +34,8 @@ coverage/
 .vite/
 .turbo/
 *.tsbuildinfo
+
+# --- diagforge 运行产物 ---
+diagforge.db*
+scratch/
+exports/

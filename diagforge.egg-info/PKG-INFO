@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: diagforge
+Version: 0.1.0
+Summary: Deterministic multi-file compiler diagnostic minimizer
+Requires-Python: >=3.9
+Provides-Extra: test
+Requires-Dist: pytest>=7; extra == "test"
