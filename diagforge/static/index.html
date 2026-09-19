@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>diagforge</title>
+<style>
+  body { font-family: -apple-system, "Helvetica Neue", sans-serif; margin: 24px;
+         background: #0f1115; color: #dde1e6; }
+  h1 { font-size: 20px; } h2 { font-size: 15px; color: #9fb4c7; margin-top: 24px; }
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; }
+  .card { background: #1a1e27; border: 1px solid #2a3040; border-radius: 8px;
+          padding: 12px 16px; min-width: 140px; }
+  .card .v { font-size: 22px; font-weight: 600; }
+  .card .k { font-size: 12px; color: #8a93a5; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #262c3a; }
+  th { color: #8a93a5; font-weight: 500; }
+  code { background: #232836; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .accepted { color: #6fdc8c; } .rejected { color: #ff8389; }
+  .unstable { color: #f1c21b; } .pending, .running { color: #78a9ff; }
+  .invalidated { color: #8a93a5; text-decoration: line-through; }
+  input, select, button { background: #1a1e27; color: #dde1e6;
+    border: 1px solid #2a3040; border-radius: 6px; padding: 6px 8px; font-size: 13px; }
+  button { cursor: pointer; } button:hover { border-color: #4589ff; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+  #err { color: #ff8389; font-size: 13px; }
+</style>
+</head>
+<body>
+<h1>diagforge · 诊断样本最小化</h1>
+<div id="meta"></div>
+<div class="cards" id="cards"></div>
+
+<h2>最早分歧</h2>
+<div id="divergence">—</div>
+
+<h2>队列中的候选</h2>
+<table id="queue"><thead><tr>
+<th>id</th><th>大小</th><th>深度</th><th>状态</th><th>变换</th></tr></thead>
+<tbody></tbody></table>
+
+<h2>事件日志（人工决定 / 撤销）</h2>
+<table id="events"><thead><tr>
+<th>#</th><th>类型</th><th>操作者</th><th>理由</th><th>前指纹</th><th>后指纹</th></tr></thead>
+<tbody></tbody></table>
+
+<h2>操作</h2>
+<div class="row">
+  <input id="actor" placeholder="操作者" value="operator">
+  <input id="reason" placeholder="理由" size="30">
+</div>
+<div class="row">
+  <input id="pinFile" placeholder="文件路径">
+  <input id="pinText" placeholder="钉住的文本" size="24">
+  <button onclick="addSpanPin()">钉住文本</button>
+  <input id="coFiles" placeholder="a.c,b.c">
+  <button onclick="addCoKeep()">声明共同保留</button>
+</div>
+<div class="row">
+  <input id="decCand" placeholder="候选 id">
+  <button onclick="decide('accept')">接受</button>
+  <button onclick="decide('reject')">拒绝</button>
+  <input id="undoEvent" placeholder="事件 id">
+  <button onclick="undo()">撤销事件</button>
+  <button onclick="resume()">恢复会话</button>
+  <button onclick="doExport()">导出包</button>
+</div>
+<div id="err"></div>
+
+<script>
+let SESSION = null;
+const esc = s => String(s ?? "").replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const short = s => s ? String(s).slice(0, 12) : "";
+
+async function api(path, body) {
+  const opt = body ? {method: "POST", headers: {"Content-Type": "application/json"},
+                      body: JSON.stringify(body)} : {};
+  const r = await fetch(path, opt);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+async function refresh() {
+  try {
+    const s = await api("/api/state");
+    document.getElementById("err").textContent = "";
+    if (!s.session) {
+      document.getElementById("meta").innerHTML = "<p>暂无会话</p>";
+      return;
+    }
+    SESSION = s.session.id;
+    document.getElementById("meta").innerHTML =
+      `<p>会话 <code>${esc(s.session.name)}</code> · 命令 <code>${esc(s.session.command)}</code>` +
+      ` · 分支 <code>${esc(s.branch.label)}</code> · 规则版本 <code>${esc(s.session.rules_version)}</code></p>`;
+    const c = s.counts || {};
+    const card = (k, v) => `<div class="card"><div class="v">${esc(v)}</div><div class="k">${k}</div></div>`;
+    document.getElementById("cards").innerHTML =
+      card("原始尺寸", s.original_size) +
+      card("当前最小", s.best ? s.best.size : "—") +
+      card("运行次数", s.runs_total) +
+      card("已接受", c.accepted || 0) +
+      card("已拒绝", c.rejected || 0) +
+      card("不稳定", c.unstable || 0) +
+      card("已失效", c.invalidated || 0) +
+      card("队列", (c.pending || 0) + (c.running || 0));
+    const d = s.earliest_divergence;
+    document.getElementById("divergence").innerHTML = d
+      ? `候选 <code>${short(d.id)}</code> · 深度 ${d.depth} · 状态 <span class="${d.state}">${d.state}</span>` +
+        ` · 变换 <code>${esc(JSON.stringify(d.transform))}</code>`
+      : "—";
+    document.querySelector("#queue tbody").innerHTML = (s.queue || []).map(q =>
+      `<tr><td><code>${short(q.id)}</code></td><td>${q.size}</td><td>${q.depth}</td>` +
+      `<td class="${q.state}">${q.state}</td><td><code>${esc(JSON.stringify(q.transform))}</code></td></tr>`
+    ).join("") || `<tr><td colspan="5">队列已空</td></tr>`;
+    document.querySelector("#events tbody").innerHTML = (s.events || []).map(e =>
+      `<tr><td>${e.seq}</td><td>${esc(e.kind)}</td><td>${esc(e.actor)}</td>` +
+      `<td>${esc(e.reason)}</td><td><code>${short(e.before_hash)}</code></td>` +
+      `<td><code>${short(e.after_hash)}</code></td></tr>`
+    ).join("") || `<tr><td colspan="6">暂无事件</td></tr>`;
+  } catch (e) {
+    document.getElementById("err").textContent = e.message;
+  }
+}
+
+async function addSpanPin() {
+  await api("/api/pin", {session: SESSION, kind: "span", actor: actor.value,
+    reason: reason.value, path: pinFile.value, text: pinText.value});
+  refresh();
+}
+async function addCoKeep() {
+  await api("/api/pin", {session: SESSION, kind: "co_keep", actor: actor.value,
+    reason: reason.value, paths: coFiles.value.split(",").map(s => s.trim()).filter(Boolean)});
+  refresh();
+}
+async function decide(kind) {
+  await api("/api/decision", {session: SESSION, kind, actor: actor.value,
+    reason: reason.value, candidate: decCand.value.trim()});
+  refresh();
+}
+async function undo() {
+  await api("/api/undo", {session: SESSION, event: undoEvent.value.trim(),
+    actor: actor.value, reason: reason.value});
+  refresh();
+}
+async function resume() {
+  const j = await api("/api/resume", {session: SESSION});
+  document.getElementById("err").textContent =
+    j.new_branch ? "指纹变化：已创建新分支 " + j.branch : "指纹一致：沿用现有分支";
+  refresh();
+}
+async function doExport() {
+  const j = await api("/api/export", {session: SESSION, out_dir: "export"});
+  document.getElementById("err").textContent = "已导出到 " + j.out_dir;
+}
+
+refresh();
+setInterval(refresh, 1500);
+</script>
+</body>
+</html>
